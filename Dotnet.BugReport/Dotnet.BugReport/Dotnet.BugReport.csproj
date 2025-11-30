@@ -16,6 +16,11 @@
         <Description>A diagnostic collection tool that generates Markdown bug reports for .NET projects.</Description>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <RepositoryUrl>https://github.com/dylan-asos/dotnet-bugreport</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="../../README.md" Pack="true" PackagePath="/"/>
+    </ItemGroup>
     
 </Project>
