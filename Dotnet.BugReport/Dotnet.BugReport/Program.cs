@@ -93,7 +93,35 @@ static string? ValidateAndResolveDirectory(string directory)
         return null;
     }
     
+    // Check if this is a root directory
+    if (IsRootDirectory(resolvedPath))
+    {
+        Console.WriteLine($"Error: Cannot scan root directory: {resolvedPath}");
+        Console.WriteLine("Please specify a subdirectory to scan.");
+        return null;
+    }
+    
     return resolvedPath;
+}
+
+static bool IsRootDirectory(string path)
+{
+    var dirInfo = new DirectoryInfo(path);
+    
+    // On Windows, check if parent is null (root drive like C:\)
+    // On Unix-like systems, check if parent is the same (root /)
+    if (dirInfo.Parent == null)
+    {
+        return true;
+    }
+    
+    // Additional check: if parent equals current, it's root (Unix)
+    if (dirInfo.Parent.FullName == dirInfo.FullName)
+    {
+        return true;
+    }
+    
+    return false;
 }
 
 // --- Report Generation ---
@@ -156,6 +184,15 @@ static void AddGlobalJson(List<string> output, string searchDirectory)
 
 static void AddProjectFiles(List<string> output, string searchDirectory)
 {
+    // Check scan size and prompt for confirmation if too large
+    if (!ConfirmLargeScan(searchDirectory))
+    {
+        output.Add("## Project Files");
+        output.Add("Scan cancelled by user.");
+        output.Add("");
+        return;
+    }
+    
     var csprojFiles = FindProjectFiles(searchDirectory);
     
     if (csprojFiles.Count > 0)
@@ -250,6 +287,103 @@ static List<(string Include, string Version)> ExtractPackageReferences(XDocument
         .OrderBy(pr => pr.Include)
         .Select(pr => (pr.Include, pr.Version))
         .ToList();
+}
+
+static bool ConfirmLargeScan(string searchDirectory)
+{
+    const int maxDirectoriesToCheck = 1000; // Threshold for warning
+    const int maxFilesToCheck = 10000; // Threshold for warning
+    
+    try
+    {
+        // Quick estimate: count top-level directories
+        var directories = Directory.GetDirectories(searchDirectory, "*", SearchOption.TopDirectoryOnly);
+        var directoryCount = directories.Length;
+        
+        // If there are many top-level directories, estimate total
+        if (directoryCount > 100)
+        {
+            // Sample a few directories to estimate depth
+            int sampledDirs = 0;
+            int totalSubdirs = 0;
+            int totalFiles = 0;
+            
+            foreach (var dir in directories.Take(10)) // Sample first 10
+            {
+                try
+                {
+                    var subdirs = Directory.GetDirectories(dir, "*", SearchOption.AllDirectories);
+                    var files = Directory.GetFiles(dir, "*", SearchOption.AllDirectories);
+                    totalSubdirs += subdirs.Length;
+                    totalFiles += files.Length;
+                    sampledDirs++;
+                    
+                    // Early exit if we already see it's too large
+                    if (totalSubdirs > maxDirectoriesToCheck || totalFiles > maxFilesToCheck)
+                    {
+                        break;
+                    }
+                }
+                catch
+                {
+                    // Skip directories we can't access
+                    continue;
+                }
+            }
+            
+            // Estimate total based on sample
+            if (sampledDirs > 0)
+            {
+                double avgSubdirs = (double)totalSubdirs / sampledDirs;
+                double avgFiles = (double)totalFiles / sampledDirs;
+                double estimatedSubdirs = avgSubdirs * directoryCount;
+                double estimatedFiles = avgFiles * directoryCount;
+                
+                if (estimatedSubdirs > maxDirectoriesToCheck || estimatedFiles > maxFilesToCheck)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("⚠️  WARNING: This scan appears to be very large!");
+                    Console.WriteLine($"   Estimated directories: ~{estimatedSubdirs:N0}");
+                    Console.WriteLine($"   Estimated files: ~{estimatedFiles:N0}");
+                    Console.WriteLine($"   Search directory: {searchDirectory}");
+                    Console.WriteLine();
+                    Console.Write("Do you want to continue? (y/N): ");
+                    
+                    var response = Console.ReadLine()?.Trim().ToLowerInvariant();
+                    return response == "y" || response == "yes";
+                }
+            }
+        }
+        
+        // Also check immediate file count as a quick sanity check
+        var immediateFiles = Directory.GetFiles(searchDirectory, "*", SearchOption.TopDirectoryOnly).Length;
+        if (immediateFiles > 5000)
+        {
+            Console.WriteLine();
+            Console.WriteLine("⚠️  WARNING: This directory contains many files!");
+            Console.WriteLine($"   Files in directory: {immediateFiles:N0}");
+            Console.WriteLine($"   Search directory: {searchDirectory}");
+            Console.WriteLine();
+            Console.Write("Do you want to continue? (y/N): ");
+            
+            var response = Console.ReadLine()?.Trim().ToLowerInvariant();
+            return response == "y" || response == "yes";
+        }
+        
+        return true;
+    }
+    catch (Exception ex)
+    {
+        // If we can't estimate, warn anyway
+        Console.WriteLine();
+        Console.WriteLine($"⚠️  WARNING: Unable to estimate scan size: {ex.Message}");
+        Console.WriteLine($"   Search directory: {searchDirectory}");
+        Console.WriteLine();
+        Console.Write("Do you want to continue? (y/N): ");
+        
+        var response = Console.ReadLine()?.Trim().ToLowerInvariant();
+        return response == "y" || response == "yes";
+    }
 }
 
 static List<string> FindProjectFiles(string searchDirectory)
