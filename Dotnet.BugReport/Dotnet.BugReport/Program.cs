@@ -2,42 +2,79 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Xml.Linq;
+using Dotnet.BugReport;
 
 // --- Main Entry Point ---
-var (searchDirectory, useClipboard) = ParseArguments(args);
-if (string.IsNullOrEmpty(searchDirectory))
+try
 {
-    return 1;
-}
-
-searchDirectory = ValidateAndResolveDirectory(searchDirectory);
-if (string.IsNullOrEmpty(searchDirectory))
-{
-    return 1;
-}
-
-var output = GenerateBugReport(searchDirectory);
-
-if (useClipboard)
-{
-    if (CopyToClipboard(output))
+    var (searchDirectory, useClipboard) = ParseArguments(args);
+    if (string.IsNullOrEmpty(searchDirectory))
     {
-        Console.WriteLine("Bug report copied to clipboard!");
-        return 0;
+        return 1;
+    }
+
+    searchDirectory = ValidateAndResolveDirectory(searchDirectory);
+    if (string.IsNullOrEmpty(searchDirectory))
+    {
+        return 1;
+    }
+
+    var output = GenerateBugReport(searchDirectory);
+
+    if (useClipboard)
+    {
+        if (ClipboardService.CopyToClipboard(output))
+        {
+            Console.WriteLine("Bug report copied to clipboard!");
+            return 0;
+        }
+        else
+        {
+            Console.WriteLine("Warning: Failed to copy to clipboard. Writing to file instead...");
+            var filePath = WriteBugReport(output, searchDirectory);
+            Console.WriteLine($"Bug report written to: {filePath}");
+            return 1;
+        }
     }
     else
     {
-        Console.WriteLine("Warning: Failed to copy to clipboard. Writing to file instead...");
         var filePath = WriteBugReport(output, searchDirectory);
         Console.WriteLine($"Bug report written to: {filePath}");
-        return 1;
+        return 0;
     }
 }
-else
+catch (Exception ex)
 {
-    var filePath = WriteBugReport(output, searchDirectory);
-    Console.WriteLine($"Bug report written to: {filePath}");
-    return 0;
+    LogError(ex);
+    return 1;
+}
+
+// --- Error Logging ---
+static void LogError(Exception ex)
+{
+    var message = SanitizeExceptionMessage(ex);
+    Console.ForegroundColor = ConsoleColor.Red;
+    Console.Error.WriteLine($"Error: {message}");
+    Console.ResetColor();
+}
+
+static string SanitizeExceptionMessage(Exception ex)
+{
+    // Get the main exception message, but clean it up
+    var message = ex.Message;
+    
+    // Remove common stack trace artifacts that might leak into message
+    message = message.Split('\n')[0].Trim();
+    message = message.Split('\r')[0].Trim();
+    
+    // If it's an inner exception, include that context
+    if (ex.InnerException != null)
+    {
+        var innerMessage = ex.InnerException.Message.Split('\n')[0].Trim();
+        message = $"{message} ({innerMessage})";
+    }
+    
+    return message;
 }
 
 // --- Argument Parsing ---
@@ -151,35 +188,54 @@ static void AddHeader(List<string> output)
 
 static void AddSystemInformation(List<string> output)
 {
-    output.Add("## System Information");
-    output.Add($"OS: {RuntimeInformation.OSDescription}");
-    output.Add($"OS Architecture: {RuntimeInformation.OSArchitecture}");
-    output.Add($"Process Architecture: {RuntimeInformation.ProcessArchitecture}");
-    output.Add($"Framework Description: {RuntimeInformation.FrameworkDescription}");
-    output.Add($"Runtime Version: {Environment.Version}");
-    output.Add("");
+    try
+    {
+        output.Add("## System Information");
+        output.Add($"OS: {RuntimeInformation.OSDescription}");
+        output.Add($"OS Architecture: {RuntimeInformation.OSArchitecture}");
+        output.Add($"Process Architecture: {RuntimeInformation.ProcessArchitecture}");
+        output.Add($"Framework Description: {RuntimeInformation.FrameworkDescription}");
+        output.Add($"Runtime Version: {Environment.Version}");
+        output.Add("");
+    }
+    catch (Exception ex)
+    {
+        // Recoverable: continue with partial system info
+        output.Add("## System Information");
+        output.Add($"Unable to retrieve some system information: {SanitizeExceptionMessage(ex)}");
+        output.Add("");
+    }
 }
 
 static void AddDotNetInfo(List<string> output)
 {
-    output.Add("### dotnet --info");
-    output.Add("```");
-    output.Add(RunAndCapture("dotnet", "--info"));
-    output.Add("```");
-    output.Add("");
+    try
+    {
+        output.Add("### dotnet --info");
+        output.Add("```");
+        output.Add(RunAndCapture("dotnet", "--info"));
+        output.Add("```");
+        output.Add("");
+    }
+    catch (Exception ex)
+    {
+        // Recoverable: continue without dotnet info
+        output.Add("### dotnet --info");
+        output.Add($"Unable to retrieve dotnet info: {SanitizeExceptionMessage(ex)}");
+        output.Add("");
+    }
 }
 
 static void AddGlobalJson(List<string> output, string searchDirectory)
 {
     var globalJsonPath = Path.Combine(searchDirectory, "global.json");
-    if (File.Exists(globalJsonPath))
-    {
-        output.Add("## global.json");
-        output.Add("```json");
-        output.Add(File.ReadAllText(globalJsonPath));
-        output.Add("```");
-        output.Add("");
-    }
+    if (!File.Exists(globalJsonPath)) return;
+    
+    output.Add("## global.json");
+    output.Add("```json");
+    output.Add(File.ReadAllText(globalJsonPath));
+    output.Add("```");
+    output.Add("");
 }
 
 static void AddProjectFiles(List<string> output, string searchDirectory)
@@ -248,7 +304,8 @@ static void AddProjectFileInfo(List<string> output, string csprojFile, string se
     }
     catch (Exception ex)
     {
-        output.Add($"Error parsing project file: {ex.Message}");
+        // Recoverable: continue with other project files
+        output.Add($"Error parsing project file: {SanitizeExceptionMessage(ex)}");
         output.Add("");
     }
 }
@@ -388,88 +445,115 @@ static bool ConfirmLargeScan(string searchDirectory)
 
 static List<string> FindProjectFiles(string searchDirectory)
 {
-    return Directory.GetFiles(searchDirectory, "*.csproj", SearchOption.AllDirectories)
-        .Where(f => !f.Contains("\\bin\\") && !f.Contains("/bin/") && 
-                    !f.Contains("\\obj\\") && !f.Contains("/obj/"))
-        .OrderBy(f => f)
-        .ToList();
+    try
+    {
+        return Directory.GetFiles(searchDirectory, "*.csproj", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("\\bin\\") && !f.Contains("/bin/") && 
+                        !f.Contains("\\obj\\") && !f.Contains("/obj/"))
+            .OrderBy(f => f)
+            .ToList();
+    }
+    catch (Exception)
+    {
+        // Recoverable: return empty list if we can't scan
+        return [];
+    }
 }
 
 static void AddSolutionFiles(List<string> output, string searchDirectory)
 {
-    var slnFiles = Directory.GetFiles(searchDirectory, "*.sln", SearchOption.TopDirectoryOnly);
-    if (slnFiles.Length > 0)
+    try
     {
+        var slnFiles = Directory.GetFiles(searchDirectory, "*.sln", SearchOption.TopDirectoryOnly);
+        if (slnFiles.Length <= 0) return;
         output.Add("## Solution Files");
-        foreach (var sln in slnFiles)
-        {
-            output.Add($"- `{Path.GetFileName(sln)}`");
-        }
+        output.AddRange(slnFiles.Select(sln => $"- `{Path.GetFileName(sln)}`"));
+        output.Add("");
+    }
+    catch (Exception ex)
+    {
+        // Recoverable: continue without solution files info
+        output.Add("## Solution Files");
+        output.Add($"Unable to scan for solution files: {SanitizeExceptionMessage(ex)}");
         output.Add("");
     }
 }
 
 static void AddEnvironmentVariables(List<string> output)
 {
-    output.Add("## Environment Variables");
-    var envPrefixes = new[] { "DOTNET_", "ASPNETCORE_", "MSBUILD_" };
-    var relevantEnvVars = Environment.GetEnvironmentVariables()
-        .Cast<DictionaryEntry>()
-        .Where(e => envPrefixes.Any(prefix => e.Key.ToString()!.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
-        .OrderBy(e => e.Key.ToString())
-        .ToList();
-    
-    if (relevantEnvVars.Count > 0)
+    try
     {
-        output.Add("```text");
-        foreach (var env in relevantEnvVars)
+        output.Add("## Environment Variables");
+        var envPrefixes = new[] { "DOTNET_", "ASPNETCORE_", "MSBUILD_" };
+        var relevantEnvVars = Environment.GetEnvironmentVariables()
+            .Cast<DictionaryEntry>()
+            .Where(e => envPrefixes.Any(prefix => e.Key.ToString()!.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(e => e.Key.ToString())
+            .ToList();
+        
+        if (relevantEnvVars.Count > 0)
         {
-            output.Add($"{env.Key} = {env.Value}");
+            output.Add("```text");
+            output.AddRange(relevantEnvVars.Select(env => $"{env.Key} = {env.Value}"));
+            output.Add("```");
         }
-        output.Add("```");
+        else
+        {
+            output.Add("No relevant environment variables found.");
+        }
+        output.Add("");
     }
-    else
+    catch (Exception ex)
     {
-        output.Add("No relevant environment variables found.");
+        // Recoverable: continue without environment variables
+        output.Add("## Environment Variables");
+        output.Add($"Unable to retrieve environment variables: {SanitizeExceptionMessage(ex)}");
+        output.Add("");
     }
-    output.Add("");
 }
 
 static void AddGitInformation(List<string> output, string searchDirectory)
 {
-    if (!Directory.Exists(Path.Combine(searchDirectory, ".git")))
-    {
-        return;
-    }
-    
-    output.Add("## Git Information");
-    
     try
     {
-        var branch = RunAndCapture("git", "rev-parse --abbrev-ref HEAD", searchDirectory).Trim();
-        if (!string.IsNullOrWhiteSpace(branch))
+        if (!Directory.Exists(Path.Combine(searchDirectory, ".git")))
         {
-            output.Add($"**Branch:** {branch}");
+            return;
         }
         
-        var commit = RunAndCapture("git", "rev-parse HEAD", searchDirectory).Trim();
-        if (!string.IsNullOrWhiteSpace(commit))
+        output.Add("## Git Information");
+        
+        try
         {
-            output.Add($"**Commit:** {commit}");
+            var branch = RunAndCapture("git", "rev-parse --abbrev-ref HEAD", searchDirectory).Trim();
+            if (!string.IsNullOrWhiteSpace(branch))
+            {
+                output.Add($"**Branch:** {branch}");
+            }
+            
+            var commit = RunAndCapture("git", "rev-parse HEAD", searchDirectory).Trim();
+            if (!string.IsNullOrWhiteSpace(commit))
+            {
+                output.Add($"**Commit:** {commit}");
+            }
+            
+            var remote = RunAndCapture("git", "remote get-url origin", searchDirectory).Trim();
+            if (!string.IsNullOrWhiteSpace(remote))
+            {
+                output.Add($"**Remote:** {remote}");
+            }
+        }
+        catch
+        {
+            output.Add("Unable to retrieve Git information.");
         }
         
-        var remote = RunAndCapture("git", "remote get-url origin", searchDirectory).Trim();
-        if (!string.IsNullOrWhiteSpace(remote))
-        {
-            output.Add($"**Remote:** {remote}");
-        }
+        output.Add("");
     }
-    catch
+    catch (Exception)
     {
-        output.Add("Unable to retrieve Git information.");
+        // Recoverable: continue without git info
     }
-    
-    output.Add("");
 }
 
 static void AddContainerDetection(List<string> output)
@@ -483,163 +567,21 @@ static void AddContainerDetection(List<string> output)
     output.Add("");
 }
 
-// --- File Operations ---
 static string WriteBugReport(List<string> output, string searchDirectory)
 {
     var fileName = $"bugreport-{DateTime.UtcNow:yyyyMMdd-HHmmss}.md";
     var filePath = Path.Combine(searchDirectory, fileName);
-    File.WriteAllLines(filePath, output);
-    return filePath;
-}
-
-// --- Clipboard Operations ---
-static bool CopyToClipboard(List<string> output)
-{
-    var text = string.Join(Environment.NewLine, output);
-    
     try
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-            // macOS: use pbcopy
-            return CopyToClipboardMac(text);
-        }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            // Windows: use clip.exe
-            return CopyToClipboardWindows(text);
-        }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-        {
-            // Linux: try xclip first, then wl-copy (Wayland)
-            return CopyToClipboardLinux(text);
-        }
-        else
-        {
-            Console.WriteLine("Unsupported platform for clipboard operations.");
-            return false;
-        }
+        File.WriteAllLines(filePath, output);
+        return filePath;
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error copying to clipboard: {ex.Message}");
-        return false;
+        // This is recoverable at the call site, but we'll let it bubble up
+        // so the caller can handle it appropriately
+        throw new Exception($"Failed to write bug report to {filePath}: {SanitizeExceptionMessage(ex)}", ex);
     }
-}
-
-static bool CopyToClipboardMac(string text)
-{
-    try
-    {
-        var psi = new ProcessStartInfo("pbcopy")
-        {
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        
-        using var proc = Process.Start(psi);
-        if (proc == null)
-        {
-            return false;
-        }
-        
-        proc.StandardInput.Write(text);
-        proc.StandardInput.Close();
-        proc.WaitForExit();
-        
-        return proc.ExitCode == 0;
-    }
-    catch
-    {
-        return false;
-    }
-}
-
-static bool CopyToClipboardWindows(string text)
-{
-    try
-    {
-        var psi = new ProcessStartInfo("clip.exe")
-        {
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        
-        using var proc = Process.Start(psi);
-        if (proc == null)
-        {
-            return false;
-        }
-        
-        proc.StandardInput.Write(text);
-        proc.StandardInput.Close();
-        proc.WaitForExit();
-        
-        return proc.ExitCode == 0;
-    }
-    catch
-    {
-        return false;
-    }
-}
-
-static bool CopyToClipboardLinux(string text)
-{
-    // Try xclip first (X11)
-    try
-    {
-        var psi = new ProcessStartInfo("xclip")
-        {
-            Arguments = "-selection clipboard",
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        
-        using var proc = Process.Start(psi);
-        if (proc != null)
-        {
-            proc.StandardInput.Write(text);
-            proc.StandardInput.Close();
-            proc.WaitForExit();
-            if (proc.ExitCode == 0)
-            {
-                return true;
-            }
-        }
-    }
-    catch
-    {
-        // xclip not available, try wl-copy
-    }
-    
-    // Try wl-copy (Wayland)
-    try
-    {
-        var psi = new ProcessStartInfo("wl-copy")
-        {
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        
-        using var proc = Process.Start(psi);
-        if (proc != null)
-        {
-            proc.StandardInput.Write(text);
-            proc.StandardInput.Close();
-            proc.WaitForExit();
-            return proc.ExitCode == 0;
-        }
-    }
-    catch
-    {
-        // Neither available
-    }
-    
-    return false;
 }
 
 // --- Helper Functions ---
