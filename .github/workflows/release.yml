@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Only run if the CI workflow succeeded and it was triggered by a push (not PR)
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+
+      - name: Get latest tag and calculate next version
+        id: version
+        run: |
+          # Get the latest tag that matches semver pattern (vX.Y.Z)
+          # Filter only valid semver tags, sort numerically, and get the highest
+          LATEST_VERSION=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+          
+          if [ -z "$LATEST_VERSION" ]; then
+            # No existing tags, start at v0.1.0
+            NEXT_VERSION="0.1.0"
+            NEXT_TAG="v0.1.0"
+            echo "No existing tags found. Starting at v0.1.0"
+          else
+            LATEST_TAG="v$LATEST_VERSION"
+            
+            # Split into major, minor, patch
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+            
+            # Validate that we have all three components
+            if [ -z "$MAJOR" ] || [ -z "$MINOR" ] || [ -z "$PATCH" ]; then
+              echo "Error: Invalid semver format in tag $LATEST_TAG"
+              exit 1
+            fi
+            
+            # Increment patch version for automatic releases
+            PATCH=$((PATCH + 1))
+            
+            NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            NEXT_TAG="v${NEXT_VERSION}"
+            echo "Latest tag: $LATEST_TAG"
+            echo "Next version: $NEXT_VERSION"
+          fi
+          
+          echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "NEXT_TAG=$NEXT_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.NEXT_TAG }}
+          name: Release ${{ steps.version.outputs.NEXT_TAG }}
+          body: |
+            ## Release ${{ steps.version.outputs.NEXT_TAG }}
+            
+            Automated release triggered by merge to main branch.
+            
+            Version: ${{ steps.version.outputs.NEXT_VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
