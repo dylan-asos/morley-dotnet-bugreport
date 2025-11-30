@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+
+        <!-- Required for dotnet tools -->
+        <PackAsTool>true</PackAsTool>
+        <ToolCommandName>dotnet-bugreport</ToolCommandName>
+        <PackageId>Morley.Dotnet.BugReport</PackageId>
+
+        <!-- NuGet metadata -->
+        <Authors>Dylan Morley</Authors>
+        <Description>A diagnostic collection tool that generates Markdown bug reports for .NET projects.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/dylan-asos/dotnet-bugreport</RepositoryUrl>
+    </PropertyGroup>
+    
+</Project>
