@@ -22,6 +22,11 @@ jobs:
         with:
           fetch-depth: 0  # Fetch all history for tags
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
       - name: Get latest tag and calculate next version
         id: version
         run: |
@@ -58,6 +63,18 @@ jobs:
           echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_OUTPUT
           echo "NEXT_TAG=$NEXT_TAG" >> $GITHUB_OUTPUT
 
+      - name: Restore dependencies
+        run: dotnet restore
+        working-directory: Dotnet.BugReport
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+        working-directory: Dotnet.BugReport
+
+      - name: Pack
+        run: dotnet pack --configuration Release --no-build -p:PackageVersion=${{ steps.version.outputs.NEXT_VERSION }} --output ./nupkg
+        working-directory: Dotnet.BugReport
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -72,3 +89,14 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+
+      - name: Publish to NuGet
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "Error: NUGET_API_KEY secret is not set"
+            exit 1
+          fi
+          dotnet nuget push ./nupkg/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        working-directory: Dotnet.BugReport
